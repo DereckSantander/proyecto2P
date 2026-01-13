@@ -1,470 +1,214 @@
-# Global Planner - Planificación Global de Trayectoria
+# Global Planner - Planificación Global con Dijkstra para Go2
 
-## 📝 Descripción del Proyecto
+Sistema de planificación de rutas global para el robot Go2 en ROS 2 usando el algoritmo de Dijkstra.
 
-Paquete ROS 2 que implementa un sistema de **planificación global de trayectoria** para robots móviles utilizando el **algoritmo de Dijkstra**. El sistema permite al robot calcular trayectorias óptimas desde su posición actual hasta un objetivo definido por el usuario en RViz, considerando obstáculos del entorno y garantizando caminos libres de colisiones mediante inflación de obstáculos.
+## 🧭 Resumen
 
-**Funcionalidades:**
-- Planificación global con algoritmo de Dijkstra
-- Recepción de pose del robot desde odometría (`/odom`)
-- Definición de objetivos mediante RViz ("2D Goal Pose")
-- Procesamiento de mapas de ocupación (`OccupancyGrid`)
-- Publicación de trayectorias (`nav_msgs/Path`)
-- Recalculación automática ante nuevos objetivos
-- Inflación de obstáculos para seguridad del robot
+Planificador global ligero escrito en Python para ROS 2 Humble que toma un mapa de ocupación, odometría del Go2 y un objetivo de RViz para generar un `nav_msgs/Path` con Dijkstra y publicarlo en `map`.
 
----
+## 🚀 Ejecución Rápida
 
-## 🧮 Algoritmo Implementado: Dijkstra
-
-### Descripción del algoritmo
-
-El **algoritmo de Dijkstra** es un método de búsqueda de caminos que encuentra la ruta de menor costo desde un nodo inicial hasta un nodo objetivo en un grafo ponderado. A diferencia de A*, Dijkstra **no utiliza heurística** (h(n) = 0), lo que garantiza encontrar siempre el camino óptimo explorando uniformemente en todas direcciones.
-
-### Funcionamiento
-
-1. **Inicialización**:
-   - Se crea un conjunto `open_set` (cola de prioridad) con el nodo inicial
-   - `g_score[start] = 0` (costo acumulado desde el inicio)
-   - `f_score[start] = 0` (en Dijkstra, f = g, sin heurística)
-
-2. **Iteración principal**:
-   ```
-   Mientras open_set no esté vacío:
-       - Extraer nodo con menor f_score (costo acumulado)
-       - Si es el objetivo: reconstruir y devolver trayectoria
-       - Para cada vecino del nodo actual:
-           * Calcular nuevo costo: g_nuevo = g_actual + costo_movimiento
-           * Si g_nuevo < g_vecino (o vecino no visitado):
-               - Actualizar g_score[vecino] = g_nuevo
-               - Actualizar f_score[vecino] = g_nuevo (sin heurística)
-               - Añadir vecino a open_set
-   ```
-
-3. **Reconstrucción de trayectoria**:
-   - Se sigue el diccionario `came_from` desde el objetivo hasta el inicio
-   - Se convierte de coordenadas de grid a coordenadas del mundo
-
-### Variables principales
-
-| Variable | Tipo | Descripción |
-|----------|------|-------------|
-| `open_set` | heap (priority queue) | Nodos por explorar, ordenados por f_score |
-| `came_from` | dict | Almacena el nodo predecesor de cada nodo visitado |
-| `g_score` | dict | Costo acumulado desde el inicio hasta cada nodo |
-| `f_score` | dict | En Dijkstra: f = g (sin heurística) |
-| `grid` | numpy array 2D | Matriz del mapa (0-100: libre-ocupado) |
-| `resolution` | float | Metros por celda del grid |
-| `inflation_radius` | float | Radio de inflación de obstáculos en metros |
-
-### Costos de movimiento
-
-El algoritmo permite movimiento en **8 direcciones** con costos diferenciados:
-
-| Dirección | Costo |
-|-----------|-------|
-| Cardinal (↑ ↓ ← →) | 1.0 |
-| Diagonal (↗ ↘ ↙ ↖) | 1.414 (√2) |
-
-### Modificaciones implementadas
-
-1. **Inflación de obstáculos**:
-   - Pre-procesamiento del mapa para expandar obstáculos
-   - Radio configurable vía parámetro `inflation_radius` (default: 0.3m)
-   - Considera el tamaño físico del robot para evitar colisiones
-
-2. **Conversión de coordenadas**:
-   - Funciones `world_to_grid()` y `grid_to_world()`
-   - Transformación bidireccional entre sistema de coordenadas del mundo y celdas del grid
-   - Permite trabajar con coordenadas reales del robot
-
-3. **Validación de celdas**:
-   - Verificación de límites del mapa antes de explorar
-   - Comprobación de ocupación (umbral: 50% de probabilidad)
-   - Evita planificar sobre obstáculos o fuera del mapa
-
-4. **Optimización de búsqueda**:
-   - Uso de `heapq` para cola de prioridad eficiente (O(log n) por operación)
-   - Almacenamiento sparse de costos (solo nodos visitados)
-   - Reducción de memoria y tiempo de cómputo
-
-### Complejidad computacional
-
-- **Temporal**: O(E log V) donde E = número de aristas, V = número de vértices
-- **Espacial**: O(V) para almacenar scores y predecesores
-
-### Diferencia con A*
-
-| Aspecto | Dijkstra (Implementado) | A* |
-|---------|------------------------|-----|
-| Heurística | h(n) = 0 | h(n) = distancia_euclidiana |
-| Exploración | Uniforme en todas direcciones | Dirigida hacia objetivo |
-| Optimalidad | **Siempre garantizada** | Garantizada si h es admisible |
-| Velocidad | Más lento (explora más nodos) | Más rápido |
-| Uso recomendado | Mapas pequeños/medianos | Mapas grandes |
-
----
-
-## 📊 Estructura del Paquete ROS 2
-
-### ROS Node Graph
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                      SISTEMA DE PLANIFICACIÓN                    │
-└─────────────────────────────────────────────────────────────────┘
-
-         ┌─────────────────┐
-         │   map_server    │
-         │  (nav2_map_server)
-         └────────┬────────┘
-                  │ /map (OccupancyGrid)
-                  ↓
-         ┌─────────────────────────┐
-         │  global_planner_node    │
-         │  (global_planner)       │
-         └─────────────────────────┘
-                  ↑        ↓
-         /odom    │        │ /planned_path (Path)
-    (Odometry)    │        │
-                  │        ↓
-         ┌────────┴────┐  ┌──────────────┐
-         │   Robot     │  │    RViz      │
-         │  (odom pub) │  │ (visualiza)  │
-         └─────────────┘  └──────┬───────┘
-                                 │
-                     /goal_pose  │
-                    (PoseStamped)│
-                                 ↓
-                    ┌────────────────────┐
-                    │ Usuario (2D Goal)  │
-                    └────────────────────┘
-```
-
-### Nodos
-
-| Nodo | Paquete | Descripción |
-|------|---------|-------------|
-| `global_planner_node` | `global_planner` | Nodo principal de planificación con algoritmo de Dijkstra |
-| `map_server` | `nav2_map_server` | Publica el mapa estático del entorno (OccupancyGrid) |
-| `lifecycle_manager_mapper` | `nav2_lifecycle_manager` | Gestiona el ciclo de vida del map_server |
-
-### Tópicos
-
-| Nombre | Tipo | Publicador | Suscriptor | Descripción |
-|--------|------|------------|------------|-------------|
-| `/map` | `nav_msgs/OccupancyGrid` | `map_server` | `global_planner_node` | Mapa de ocupación del entorno |
-| `/odom` | `nav_msgs/Odometry` | Robot/Simulador | `global_planner_node` | Odometría del robot (pose actual) |
-| `/goal_pose` | `geometry_msgs/PoseStamped` | RViz | `global_planner_node` | Objetivo 2D definido por usuario |
-| `/planned_path` | `nav_msgs/Path` | `global_planner_node` | RViz | Trayectoria calculada |
-
-### Parámetros configurables
-
-| Parámetro | Tipo | Default | Descripción |
-|-----------|------|---------|-------------|
-| `inflation_radius` | float | 0.3 | Radio de inflación de obstáculos (metros) |
-| `map_topic` | string | `/map` | Tópico del mapa |
-| `odom_topic` | string | `/odom` | Tópico de odometría |
-| `goal_topic` | string | `/goal_pose` | Tópico del objetivo |
-| `path_topic` | string | `/planned_path` | Tópico de la trayectoria |
-
----
-
-## 📦 Dependencias
-
-### Software requerido
-
-| Dependencia | Versión mínima | Descripción |
-|-------------|----------------|-------------|
-| ROS 2 | Humble/Iron/Jazzy | Framework de robótica |
-| Python | 3.8+ | Lenguaje de programación |
-| NumPy | 1.20+ | Procesamiento de arrays numéricos |
-| Nav2 Map Server | ROS 2 | Servidor de mapas estáticos |
-| Nav2 Lifecycle Manager | ROS 2 | Gestor de ciclo de vida de nodos |
-
-### Instalación de dependencias
+### Preparación Inicial (una sola vez)
 
 ```bash
-# Paquetes ROS 2
-sudo apt install ros-${ROS_DISTRO}-nav2-map-server \
-                 ros-${ROS_DISTRO}-nav2-lifecycle-manager \
-                 ros-${ROS_DISTRO}-nav-msgs \
-                 ros-${ROS_DISTRO}-geometry-msgs \
-                 ros-${ROS_DISTRO}-sensor-msgs
-
-# Paquetes Python
-pip3 install numpy
-```
-
----
-
-## 🚀 Instalación, Compilación y Ejecución
-
-### Paso 1: Clonar el repositorio
-
-```bash
-cd ~/ros2_ws/src
-git clone <URL_DEL_REPOSITORIO> global_planner
-```
-
-### Paso 2: Instalar dependencias
-
-```bash
-cd ~/ros2_ws
-
-# Instalar dependencias automáticamente con rosdep
-rosdep install --from-paths src --ignore-src -r -y
-
-# Instalar NumPy si no está instalado
-pip3 install numpy
-```
-
-### Paso 3: Compilar el paquete
-
-```bash
-cd ~/ros2_ws
+cd ~/proyecto2p
 colcon build --packages-select global_planner
 source install/setup.bash
 ```
 
-### Paso 4: Ejecutar el sistema
-
+Coloca tu mapa en el directorio de mapas:
 ```bash
-# Lanzar el sistema completo (map_server + planificador)
-ros2 launch global_planner planner_with_map_launch.py
+cp /ruta/a/tu/small_house.pgm ~/proyecto2p/src/global_planner/maps/map.pgm
 ```
 
-> **Nota**: El mapa ya está incluido en `maps/` del repositorio, no necesitas añadirlo.
+---
 
-### Paso 5: Visualizar en RViz (terminal separada)
+## 📋 Pasos de Ejecución (5 Terminales)
+
+### Terminal 1 — Map Server
+Carga el mapa de ocupación:
 
 ```bash
+source ~/proyecto2p/install/setup.bash
+ros2 run nav2_map_server map_server --ros-args -p yaml_filename:="$(cd ~/proyecto2p/src/global_planner/maps && pwd)/map.yaml"
+```
+
+Una vez que arranque, en otra pestaña de Terminal 1:
+```bash
+ros2 lifecycle set /map_server configure
+ros2 lifecycle set /map_server activate
+```
+
+---
+
+### Terminal 2 — Bringup del Go2
+Lanza el robot con odometría, descripción y controladores:
+
+```bash
+source ~/proyecto2p/install/setup.bash
+ros2 launch go2_config bringup.launch.py hardware_connected:=true
+```
+
+Este comando lanza automáticamente:
+- `robot_state_publisher` (descripción del robot)
+- `state_estimation_node` (estimación de pose)
+- `footprint_to_odom_ekf` (publica `/odom`)
+
+---
+
+### Terminal 3 — Transformación Estática map→odom
+(Solo necesario si tu robot no publica map→odom por localization/SLAM)
+
+```bash
+source ~/proyecto2p/install/setup.bash
+ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 map odom
+```
+
+---
+
+### Terminal 4 — Planificador Dijkstra
+Lanza el nodo de planificación:
+
+```bash
+source ~/proyecto2p/install/setup.bash
+ros2 run global_planner dijkstra_planner
+```
+
+**Deberías ver en los logs:**
+```
+============================================================
+✅ Algoritmo implementado
+============================================================
+✅ Mapa cargado correctamente
+✅ Odometría recibida correctamente
+📊 Estado: ✅ Mapa | ✅ Odometría | ❌ Objetivo
+```
+
+---
+
+### Terminal 5 — RViz
+Abre RViz (tu instancia manual):
+
+```bash
+source ~/proyecto2p/install/setup.bash
 rviz2
 ```
 
-**Configuración de RViz:**
-1. Fixed Frame → `map`
-2. Add → By topic → `/map` → Map
-3. Add → By topic → `/planned_path` → Path
-4. Toolbar → "2D Goal Pose" → Clic en el mapa para definir objetivos
+**Configuración en RViz:**
+1. Fixed Frame: `map`
+2. Agrega display "OccupancyGrid" → Topic: `/map`
+   - QoS → Reliability: **Reliable**
+   - QoS → Durability: **Transient Local**
+3. Agrega display "Path" → Topic: `/global_path`
+4. Agrega display "RobotModel" → visualiza el Go2
 
 ---
 
-## 🎮 Launch Files
+## 🎮 Cómo Usar
 
-### 1. `planner_with_map_launch.py` (Recomendado)
+1. Asegúrate de que todos los comandos están ejecutándose (5 terminales)
+2. En RViz, haz clic en el botón **"2D Goal Pose"** (flecha verde superior)
+3. Haz clic en cualquier punto del mapa para definir el objetivo
+4. El planificador ejecutará Dijkstra automáticamente
+5. Verás la trayectoria en verde en RViz
 
-Lanza el sistema completo incluyendo map_server, lifecycle_manager y el nodo de planificación. Carga automáticamente el mapa desde `maps/map.yaml`.
-
-```bash
-ros2 launch global_planner planner_with_map_launch.py
+**Logs del planificador mostrarán:**
 ```
-
-### 2. `global_planner_launch.py`
-
-Lanza únicamente el nodo de planificación. Requiere que map_server esté corriendo externamente.
-
-```bash
-ros2 launch global_planner global_planner_launch.py
-```
-
-### Argumentos disponibles
-
-```bash
-# Usar tiempo de simulación (para Gazebo)
-ros2 launch global_planner planner_with_map_launch.py use_sim_time:=true
-
-# Especificar mapa personalizado
-ros2 launch global_planner planner_with_map_launch.py map:=/ruta/a/tu/mapa.yaml
-
-# Especificar archivo de parámetros personalizado
-ros2 launch global_planner planner_with_map_launch.py params_file:=/ruta/a/params.yaml
+🎯 Nuevo objetivo: x=2.50, y=3.50
+🔍 Ejecutando Dijkstra...
+✅ CAMINO ENCONTRADO!
+   - Nodos visitados: 1250
+📤 Path publicado en /global_path
+   - Puntos: 125
+   - Longitud: 15.75m
 ```
 
 ---
 
-## 🔍 Verificación del Sistema
+## 📊 Tópicos
 
-### Ver nodos activos
+### Suscripciones
+- `/odom` — Odometría del Go2
+- `/goal_pose` — Objetivo desde RViz
+- `/map` — Mapa de ocupación
 
-```bash
-ros2 node list
-```
-
-Deberías ver:
-- `/map_server`
-- `/global_planner_node`
-- `/lifecycle_manager_mapper`
-
-### Ver tópicos activos
-
-```bash
-ros2 topic list
-```
-
-Deberías ver:
-- `/map`
-- `/odom`
-- `/goal_pose`
-- `/planned_path`
-
-### Monitorear la trayectoria publicada
-
-```bash
-ros2 topic echo /planned_path
-```
-
-### Ver información del nodo de planificación
-
-```bash
-ros2 node info /global_planner_node
-```
-
-### Enviar objetivo de prueba por comando
-
-```bash
-ros2 topic pub /goal_pose geometry_msgs/PoseStamped "{
-  header: {frame_id: 'map'},
-  pose: {
-    position: {x: 2.0, y: 1.0, z: 0.0},
-    orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
-  }
-}" --once
-```
+### Publicaciones
+- `/global_path` — Trayectoria (nav_msgs/Path)
 
 ---
 
-## 🛠️ Solución de Problemas
+## 🧠 Algoritmo usado
 
-### El nodo no encuentra trayectorias
+- **Dijkstra sobre grilla 2D**: convierte `map` (OccupancyGrid) a matriz, infla obstáculos (`inflation_radius`) y calcula vecinos 4 u 8 direcciones (`use_diagonal`).
+- **Costos y visitados**: heap de prioridad (`heapq`) con costo acumulado; rechaza celdas ocupadas `occupied_threshold` y desconocidas.
+- **Parámetros clave**: `use_diagonal`, `occupied_threshold`, `inflation_radius`, `path_resolution` (controla densidad del `Path`).
+- **Extras**: suavizado básico (omite puntos colineales), QoS `TRANSIENT_LOCAL` para recibir mapas previos y chequeo periódico de estado de datos requeridos.
 
-**Posibles causas:**
-- El mapa no se está publicando correctamente
-- El `inflation_radius` es muy grande y bloquea caminos
-- El objetivo está dentro de un obstáculo
+## 🚀 Launch files
 
-**Solución:**
+- `launch/map_server.launch.py`: despliega `nav2_map_server` con lifecycle manager y argumentos `map`/`use_sim_time`.
+- `launch/planner_bringup.launch.py`: levanta mapa, lifecycle manager, nodo `dijkstra_planner` con parámetros por defecto y RViz configurado.
+- `launch/planner_only.launch.py`: solo `dijkstra_planner` + RViz para entornos donde mapa/odom ya existen.
+
+---
+
+## ⚙️ Parámetros
+
+Lanza el planificador con parámetros personalizados:
+
 ```bash
-# Verificar que el mapa se publica
-ros2 topic echo /map --once
-
-# Verificar parámetros del planificador
-ros2 param list /global_planner_node
+ros2 run global_planner dijkstra_planner --ros-args \
+  -p use_diagonal:=true \
+  -p occupied_threshold:=65 \
+  -p inflation_radius:=0.3 \
+  -p path_resolution:=0.05
 ```
 
-### La trayectoria no se visualiza en RViz
-
-**Solución:**
-1. Verificar que el `Fixed Frame` sea `map`
-2. Añadir display de tipo `Path` en RViz con topic `/planned_path`
-3. Verificar que el nodo está publicando:
-   ```bash
-   ros2 topic hz /planned_path
-   ```
-
-### "No map received"
-
-**Solución:**
-- Asegúrate de usar el launch completo: `planner_with_map_launch.py`
-- Verifica que el map_server está corriendo:
-  ```bash
-  ros2 node list | grep map_server
-  ```
-
-### El robot no se mueve
-
-**Aclaración**: Este paquete solo realiza **planificación global**, no control del robot. Para que el robot siga la trayectoria necesitas:
-- Un controlador de trayectoria (como `nav2_controller` de Nav2)
-- O implementar tu propio seguidor de trayectoria que lea `/planned_path`
+| Parámetro | Valor | Descripción |
+|-----------|-------|-------------|
+| `use_diagonal` | true/false | Permite movimientos diagonales |
+| `occupied_threshold` | 0-100 | Umbral de ocupación |
+| `inflation_radius` | metros | Radio de seguridad alrededor de obstáculos |
+| `path_resolution` | metros | Resolución del camino generado |
 
 ---
 
-## 📁 Estructura del Proyecto
+## ❌ Solución de Problemas
+
+| Problema | Causa | Solución |
+|----------|-------|----------|
+| "Frame map does not exist" en RViz | Falta TF map→odom | Ejecuta Terminal 3 |
+| "No map received" en RViz | QoS incorrecto en RViz | Cambia Durability a "Transient Local" |
+| No aparece `/odom` | Go2 no lanzado | Verifica Terminal 2 |
+| Objetivo no se recalcula | Planificador no corre | Verifica Terminal 4 logs |
+| Path vacío o muy corto | Obstáculos bloquean todo | Reduce `inflation_radius` |
+
+---
+
+## 📝 Arquitectura del Sistema
 
 ```
-global_planner/
-├── config/
-│   └── planner_params.yaml          # Parámetros configurables
-├── global_planner/
-│   ├── __init__.py                  # Módulo Python
-│   └── global_planner_node.py       # Nodo principal con Dijkstra
-├── launch/
-│   ├── global_planner_launch.py     # Launch solo planificador
-│   └── planner_with_map_launch.py   # Launch completo (recomendado)
-├── maps/
-│   ├── map.yaml                     # Configuración del mapa (incluido)
-│   └── map.pgm                      # Imagen del mapa (incluido)
-├── resource/
-│   └── global_planner               # Resource marker
-├── .gitignore                       # Control de versiones
-├── package.xml                      # Manifest ROS 2
-├── setup.py                         # Setup Python
-├── setup.cfg                        # Configuración setup
-└── README.md                        # Este archivo
+Map Server (T1)
+    ↓
+    map_server → /map (OccupancyGrid)
+                    ↓
+                    ├─→ Planificador (T4)
+                    │       ↓
+                    │   Dijkstra Algorithm
+                    │       ↓
+                    │   /global_path
+                    ↓ (visualizado en RViz)
+RViz (T5)
+    ↑
+    ├─ 2D Goal Pose → /goal_pose
+    ├─ Map Display ← /map
+    └─ Path Display ← /global_path
+
+Go2 Bringup (T2)
+    ↓
+    └─ state_estimation_node → /odom (Odometry)
+                    ↓
+                    Planificador (T4)
 ```
 
 ---
-
-## 📚 Detalles de Implementación
-
-### Clase `DijkstraPlanner`
-
-Implementa el algoritmo de Dijkstra sobre un grid 2D:
-
-**Métodos principales:**
-- `__init__(occupancy_grid, inflation_radius)`: Inicializa con el mapa y radio de inflación
-- `inflate_obstacles(inflation_radius)`: Expande obstáculos considerando tamaño del robot
-- `world_to_grid(x, y)`: Convierte coordenadas del mundo a índices de grid
-- `grid_to_world(grid_x, grid_y)`: Convierte índices de grid a coordenadas del mundo
-- `is_valid(grid_x, grid_y)`: Verifica si una celda es válida (libre y dentro del mapa)
-- `heuristic(a, b)`: Retorna 0.0 (sin heurística para Dijkstra puro)
-- `get_neighbors(pos)`: Retorna vecinos válidos con sus costos (8-conectividad)
-- `plan(start, goal)`: Ejecuta Dijkstra y retorna la trayectoria óptima
-
-**Características:**
-- Sin heurística: Explora uniformemente (garantiza optimalidad)
-- Inflación de obstáculos: Radio configurable para seguridad
-- 8-conectividad: Movimientos diagonales permitidos
-- Cola de prioridad eficiente: `heapq` de Python
-
-### Clase `GlobalPlannerNode`
-
-Nodo ROS 2 que integra el planificador con el sistema:
-
-**Callbacks:**
-- `map_callback(msg)`: Recibe el mapa y crea instancia de DijkstraPlanner
-- `odom_callback(msg)`: Actualiza la pose actual del robot
-- `goal_callback(msg)`: Recibe objetivo, planifica y publica trayectoria
-
-**Características:**
-- Gestión de estado: Mantiene pose, mapa y planificador actualizados
-- Validación: Verifica que hay mapa y pose antes de planificar
-- Publicación: Genera `nav_msgs/Path` con todas las poses de la trayectoria
-- Recalculación automática: Cada nuevo objetivo genera nueva trayectoria
-
----
-
-## 📝 Notas Importantes
-
-1. **Mapa incluido**: El repositorio incluye un mapa de ejemplo en `maps/`. Puedes reemplazarlo con tu propio mapa.
-
-2. **Solo planificación**: Este paquete NO incluye control de movimiento. Solo calcula y publica la trayectoria.
-
-3. **Requiere odometría**: Necesitas un nodo que publique `/odom` (robot real o simulador).
-
-4. **Reproducibilidad**: Siguiendo los pasos de este README, el sistema debe funcionar sin modificaciones adicionales.
-
----
-
-## 👤 Autor
-
-- **Nombre**: Dereck
-- **Proyecto**: Parte B - Planificación Global de Trayectoria
-- **Curso**: Robótica Móvil - 2do Parcial
-- **Fecha**: Enero 2026
-
----
-
-## 📄 Licencia
-
-MIT License
