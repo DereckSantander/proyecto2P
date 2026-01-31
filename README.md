@@ -2,6 +2,10 @@
 
 Sistema de planificación de rutas global para el robot Go2 en ROS 2 usando el algoritmo de Dijkstra.
 
+## YouTube
+
+▶️ [Demo del proyecto en YouTube](https://www.youtube.com/watch?v=E58xNA6WzRI)
+
 ## 🧭 Resumen
 
 Planificador global ligero escrito en Python para ROS 2 Humble que toma un mapa de ocupación, odometría del Go2 y un objetivo de RViz para generar un `nav_msgs/Path` con Dijkstra y publicarlo en `map`.
